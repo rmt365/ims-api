@@ -107,7 +107,7 @@ interface BaseResponse {
 }
 
 interface ContactMechResponse extends BaseResponse {
-    type: string;
+    type: ContactMechType;
     value: string;
     isPrimary: boolean;
 }
@@ -174,8 +174,8 @@ export const get = api(
     { expose: true, method: "GET", path: "/party/:id" },
     async ({ id }: { id: number }): Promise<Party> => {
         const party = await orm('parties').where('id', id).first();
-        // const contactMechs = await getPartyPrimaryContactMechs(id);
-        return { ...party };
+        const contactMechs = await getPartyPrimaryContactMechs(id, orm);
+        return { ...party, contactMechs };
     }
 );
 
@@ -200,9 +200,9 @@ export const create = api(
             }).returning('*');
 
             // Add primary CMs if provided
-            // if (params.primaryContactMechs) {
-            //     await addPrimaryContactMechs(party.id, params.primaryContactMechs, trx);
-            // }
+            if (params.primaryContactMechs) {
+                await addPrimaryContactMechs(party.id, params.primaryContactMechs, trx);
+            }
 
             // // Add roles and their CMs if provided
             // if (params.roles) {
@@ -215,18 +215,44 @@ export const create = api(
 );
 
 async function getFullParty(partyId: number, trx: any): Promise<PartyResponse> {
-    const party = await trx('parties').where('id', partyId).first();
-    // const cms = await getPartyPrimaryContactMechs(partyId, trx);
+    const party = await trx('parties').where({'id': partyId, deleted_at: null}).first();
+    const cms = await getPartyPrimaryContactMechs(partyId);
     // const roles = await getPartyRolesWithCMs(partyId, trx);
     // const relationships = await getPartyRelationships(partyId, trx);
     
     return {
-        ...party//,
-        // contactMechs: cms,
+        ...party,
+        contactMechs: cms//,
         // roles,
         // relationships,
         // isActive: isCurrentlyValid(party.valid_from, party.valid_to)
     };
 }
 
+// Helper functions
+async function addPrimaryContactMechs(partyId: number, cms: Record<string, string>, trx: any ) {
+    const entries = Object.entries(cms);
+    for (const [type, value] of entries) {
+        if (value) {
+            await trx('contact_mechanisms').insert({
+                party_id: partyId,
+                type,
+                value,
+                is_primary: true
+            });
+        }
+    }
+}
+
+async function getPartyPrimaryContactMechs(partyId: number) {
+    const cms = await orm('contact_mechanisms')
+        .where({ party_id: partyId, is_primary: true, deleted_at: null })
+        .select();
+    
+    return cms.reduce((acc, cm) => ({
+        ...acc,
+        [cm.type]: { id: cm.id, value: cm.value, isPrimary: cm.isPrimary }
+    }), {});
+
+}
 
