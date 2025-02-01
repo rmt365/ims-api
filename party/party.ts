@@ -174,8 +174,17 @@ export const get = api(
     { expose: true, method: "GET", path: "/party/:id" },
     async ({ id }: { id: number }): Promise<Party> => {
         const party = await orm('parties').where('id', id).first();
-        const contactMechs = await getPartyPrimaryContactMechs(id, orm);
+        const contactMechs = await getPartyPrimaryContactMechs(id);
         return { ...party, contactMechs };
+    }
+);
+
+// Get full party details
+export const getFull = api(
+    { expose: true, method: "GET", path: "/party/:id/full" },
+    async ({ id }: { id: number }): Promise<Party> => {
+        const fullParty = await getFullParty(id);
+        return fullParty;
     }
 );
 
@@ -205,27 +214,27 @@ export const create = api(
             }
 
             // // Add roles and their CMs if provided
-            // if (params.roles) {
-            //     await addRolesWithCMs(party.id, params.roles, trx);
-            // }
+            if (params.roles) {
+                await addRolesWithCMs(party.id, params.roles, trx);
+            }
 
             return await getFullParty(party.id, trx);
         });
     }
 );
 
-async function getFullParty(partyId: number, trx: any): Promise<PartyResponse> {
+async function getFullParty(partyId: number, trx: any = orm): Promise<PartyResponse> {
     const party = await trx('parties').where({'id': partyId, deleted_at: null}).first();
-    const cms = await getPartyPrimaryContactMechs(partyId);
-    // const roles = await getPartyRolesWithCMs(partyId, trx);
+    const cms = await getPartyPrimaryContactMechs(partyId, trx);
+    const roles = await getPartyRolesWithCMs(partyId, trx);
     // const relationships = await getPartyRelationships(partyId, trx);
     
     return {
         ...party,
-        contactMechs: cms//,
-        // roles,
+        contactMechs: cms,
+        roles,
         // relationships,
-        // isActive: isCurrentlyValid(party.valid_from, party.valid_to)
+        isActive: isCurrentlyValid(party.valid_from, party.valid_to)
     };
 }
 
@@ -244,11 +253,12 @@ async function addPrimaryContactMechs(partyId: number, cms: Record<string, strin
     }
 }
 
-async function getPartyPrimaryContactMechs(partyId: number) {
-    const cms = await orm('contact_mechanisms')
+async function getPartyPrimaryContactMechs(partyId: number, trx: any = orm): Promise<ContactMechsMap> {
+    const cms = await trx('contact_mechanisms')
         .where({ party_id: partyId, is_primary: true, deleted_at: null })
         .select();
     
+    console.log({cms});
     return cms.reduce((acc, cm) => ({
         ...acc,
         [cm.type]: { id: cm.id, value: cm.value, isPrimary: cm.isPrimary }
@@ -256,3 +266,69 @@ async function getPartyPrimaryContactMechs(partyId: number) {
 
 }
 
+async function addRolesWithCMs(partyId: number, roles: Role[], trx: any) {
+    for (const role of roles) {
+        // Add role
+        const [newRole] = await trx('roles').insert({
+            party_id: partyId,
+            role_type: role.type,
+            valid_from: role.validFrom,
+            valid_to: role.validTo
+        }).returning('*');
+
+        // Add role CMs if any
+        if (role.cmsForRole) {
+            for (const cm of role.cmsForRole) {
+                // Check if the CM already exists for the party
+                let contactMech = await trx('contact_mechanisms')
+                    .where({ party_id: partyId, type: cm.type, value: cm.value, deleted_at: null })
+                    .first();
+
+                    // If CM does not exist, create it
+                if (Object.keys(contactMech).length === 0) {
+                    [contactMech] = await trx('contact_mechanisms').insert({
+                        party_id: partyId,
+                        type: cm.type,
+                        value: cm.value,
+                        is_primary: cm.isPrimary ?? false
+                    }).returning('*');
+                }
+
+                // Link CM to the role
+                await trx('role_contact_mechanisms').insert({
+                    role_id: newRole.id,
+                    contact_mechanism_id: contactMech.id
+                });
+            }
+        }
+    }
+}
+
+async function getPartyRolesWithCMs(partyId: number, trx: any = orm): Promise<RoleResponse[]> {
+    const roles = await trx('roles')
+        .where('party_id', partyId)
+        .andWhere('deleted_at', null)
+        .select();
+
+    for (const role of roles) {
+        const cms = await trx('contact_mechanisms')
+            .join('role_contact_mechanisms', 'contact_mechanisms.id', 'role_contact_mechanisms.contact_mechanism_id')
+            .where('role_contact_mechanisms.role_id', role.id)
+            .andWhere('contact_mechanisms.deleted_at', null)
+            .select('contact_mechanisms.id', 'contact_mechanisms.type', 'contact_mechanisms.value', 'contact_mechanisms.is_primary');
+
+        role.cmsForRole = cms.map(cm => ({
+            id: cm.id,
+            type: cm.type,
+            value: cm.value,
+            isPrimary: cm.isPrimary
+        }));
+    }
+    return roles;
+}
+
+// Helper function to check if a record is currently valid
+function isCurrentlyValid(validFrom?: Date, validTo?: Date): boolean {
+    const now = new Date();
+    return (!validFrom || now >= validFrom) && (!validTo || now <= validTo);
+}
