@@ -296,37 +296,44 @@ async function getPartyContactMechs(partyId: number, primaryOnly: boolean = true
 async function addRolesWithCMs(partyId: number, roles: Role[], trx: any) {
     for (const role of roles) {
         // Add role
-        const [newRole] = await trx('roles').insert({
-            party_id: partyId,
-            role_type: role.type,
-            valid_from: role.validFrom,
-            valid_to: role.validTo
-        }).returning('*');
+        try {
+            const [newRole] = await trx('roles').insert({
+                party_id: partyId,
+                role_type: role.type,
+                valid_from: role.validFrom,
+                valid_to: role.validTo
+            }).returning('*');
 
-        // Add role CMs if any
-        if (role.cmsForRole) {
-            for (const cm of role.cmsForRole) {
-                // Check if the CM already exists for the party
-                let contactMech = await trx('contact_mechanisms')
-                    .where({ party_id: partyId, type: cm.type, value: cm.value, deleted_at: null })
-                    .first();
+            // Add role CMs if any
+            if (role.cmsForRole) {
+                for (const cm of role.cmsForRole) {
+                    // Check if the CM already exists for the party
+                    let contactMech = await trx('contact_mechanisms')
+                        .where({ party_id: partyId, type: cm.type, value: cm.value, deleted_at: null })
+                        .first();
 
-                    // If CM does not exist, create it
-                if (Object.keys(contactMech).length === 0) {
-                    [contactMech] = await trx('contact_mechanisms').insert({
-                        party_id: partyId,
-                        type: cm.type,
-                        value: cm.value,
-                        is_primary: cm.isPrimary ?? false
-                    }).returning('*');
+                        // If CM does not exist, create it
+                    if (Object.keys(contactMech).length === 0) {
+                        [contactMech] = await trx('contact_mechanisms').insert({
+                            party_id: partyId,
+                            type: cm.type,
+                            value: cm.value,
+                            is_primary: cm.isPrimary ?? false
+                        }).returning('*');
+                    }
+
+                    // Link CM to the role
+                    await trx('role_contact_mechanisms').insert({
+                        role_id: newRole.id,
+                        contact_mechanism_id: contactMech.id
+                    });
                 }
-
-                // Link CM to the role
-                await trx('role_contact_mechanisms').insert({
-                    role_id: newRole.id,
-                    contact_mechanism_id: contactMech.id
-                });
             }
+        } catch (error) {
+            if (error.code === '23503') { // PostgreSQL foreign key violation error code
+                throw new APIError(ErrCode.BadRequest, `Invalid role type: ${role.type}`);
+            }
+            throw error;
         }
     }
 }
