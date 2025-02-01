@@ -1,5 +1,5 @@
 
-import { api } from "encore.dev/api";
+import { api, APIError, ErrCode } from "encore.dev/api";
 import { SQLDatabase } from "encore.dev/storage/sqldb";
 import knex from "knex";
 import _ from "lodash";
@@ -65,6 +65,9 @@ export interface Party extends BaseEntity {
     displayNameFormat?: DisplayFormat;
     contactMechs?: ContactMechsMap;
     roles?: Role[];
+}
+
+export interface PartyFull extends Party {
     relationships?: RelationshipMap;
 }
 
@@ -173,16 +176,26 @@ const orm = knex({ client: "pg", connection: PartyDB.connectionString,
 export const get = api(
     { expose: true, method: "GET", path: "/party/:id" },
     async ({ id }: { id: number }): Promise<Party> => {
+
         const party = await orm('parties').where('id', id).first();
-        const contactMechs = await getPartyPrimaryContactMechs(id);
-        return { ...party, contactMechs,  isActive: isCurrentlyValid(party.valid_from, party.valid_to) };
+
+        if (Object.keys(party).length === 0) {
+            throw new APIError(ErrCode.NotFound, `Party with id ${id} not found`);
+        }
+
+        const [contactMechs, roles] = await Promise.all([
+                getPartyContactMechs(id),
+                getPartyRolesWithCMs(id)
+            ]);
+ 
+        return { ...party, contactMechs, roles, isActive: isCurrentlyValid(party.valid_from, party.valid_to) };
     }
 );
 
 // Get full party details
 export const getFull = api(
     { expose: true, method: "GET", path: "/party/:id/full" },
-    async ({ id }: { id: number }): Promise<Party> => {
+    async ({ id }: { id: number }): Promise<PartyFull> => {
         const fullParty = await getFullParty(id);
         return fullParty;
     }
@@ -224,10 +237,16 @@ export const create = api(
 );
 
 async function getFullParty(partyId: number, trx: any = orm): Promise<PartyResponse> {
-    const party = await trx('parties').where({'id': partyId, deleted_at: null}).first();
-    const cms = await getPartyPrimaryContactMechs(partyId, trx);
-    const roles = await getPartyRolesWithCMs(partyId, trx);
-    // const relationships = await getPartyRelationships(partyId, trx);
+    const party = await trx('parties').where('id', partyId).first();
+
+    if(Object.keys(party).length === 0) {
+        throw new APIError(ErrCode.NotFound, `Party with id ${partyId} not found`);
+    }
+
+    const [cms, roles] = await Promise.all([
+        getPartyContactMechs(partyId, false, trx),
+        getPartyRolesWithCMs(partyId, trx)
+    ]); // const relationships = await getPartyRelationships(partyId, trx);
     
     return {
         ...party,
@@ -253,17 +272,25 @@ async function addPrimaryContactMechs(partyId: number, cms: Record<string, strin
     }
 }
 
-async function getPartyPrimaryContactMechs(partyId: number, trx: any = orm): Promise<ContactMechsMap> {
-    const cms = await trx('contact_mechanisms')
-        .where({ party_id: partyId, is_primary: true, deleted_at: null })
-        .select();
-    
-    console.log({cms});
-    return cms.reduce((acc, cm) => ({
-        ...acc,
-        [cm.type]: { id: cm.id, value: cm.value, isPrimary: cm.isPrimary }
-    }), {});
 
+async function getPartyContactMechs(partyId: number, primaryOnly: boolean = true, trx: any = orm): Promise<ContactMechsMap> {
+    const query = trx('contact_mechanisms')
+        .where({ party_id: partyId, deleted_at: null });
+
+    if (primaryOnly) {
+        query.andWhere({ is_primary: true });
+    }
+
+    const cms = await query.select();
+
+    return cms.reduce((acc, cm) => {
+        const key = cm.type;
+        if (!acc[key]) {
+            acc[key] = [];
+        }
+        acc[key].push({ id: cm.id, value: cm.value, isPrimary: cm.isPrimary });
+        return acc;
+    }, {} as ContactMechsMap);
 }
 
 async function addRolesWithCMs(partyId: number, roles: Role[], trx: any) {
