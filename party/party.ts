@@ -175,7 +175,7 @@ export const get = api(
     async ({ id }: { id: number }): Promise<Party> => {
         const party = await orm('parties').where('id', id).first();
         const contactMechs = await getPartyPrimaryContactMechs(id);
-        return { ...party, contactMechs };
+        return { ...party, contactMechs,  isActive: isCurrentlyValid(party.valid_from, party.valid_to) };
     }
 );
 
